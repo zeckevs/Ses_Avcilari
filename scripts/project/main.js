@@ -18,6 +18,8 @@ let oyun4DragEnabled = false;
 let oyun4DragState = null;
 let oyun4InitialPositions = new Map();
 let oyun4OccupiedTargets = new Map();
+let oyun4ListenRequestId = 0;
+let oyun4SimultaneousAudios = [];
 let finalEffectStates = [];
 
 runOnStartup(async runtime =>
@@ -74,6 +76,8 @@ async function HandleLayoutStart(runtime)
 	{
 		oyun4DragEnabled = false;
 		oyun4DragState = null;
+		oyun4ListenRequestId++;
+		StopOyun4SimultaneousAudio();
 	}
 
 	if (currentLayoutName !== "final")
@@ -291,10 +295,16 @@ function SetupOyun4Layout(runtime)
 	oyun4DragState = null;
 	oyun4InitialPositions = new Map();
 	oyun4OccupiedTargets = new Map();
+	oyun4ListenRequestId++;
+	StopOyun4SimultaneousAudio();
 
 	const nextButton = runtime.objects.btn_ileri?.getFirstInstance();
 	if (nextButton)
 		nextButton.isVisible = false;
+
+	const listenButton = runtime.objects.btn_dinle?.getFirstInstance();
+	if (listenButton)
+		listenButton.isVisible = false;
 
 	const family = runtime.objects.oyun4;
 	if (!family)
@@ -305,6 +315,15 @@ function SetupOyun4Layout(runtime)
 		const [x, y] = instance.getPosition();
 		oyun4InitialPositions.set(instance.uid, { x, y });
 	}
+}
+
+function SetOyun4ListenButtonState(runtime)
+{
+	const listenButton = runtime.objects.btn_dinle?.getFirstInstance();
+	if (!listenButton)
+		return;
+
+	listenButton.isVisible = oyun4OccupiedTargets.size >= 5;
 }
 
 function BeginOyun4Drag(runtime, event)
@@ -326,6 +345,7 @@ function BeginOyun4Drag(runtime, event)
 		if (occupant.uid === draggedInstance.uid)
 		{
 			oyun4OccupiedTargets.delete(targetUid);
+			SetOyun4ListenButtonState(runtime);
 			break;
 		}
 	}
@@ -412,6 +432,7 @@ function HandleOyun4PointerUp(runtime, event)
 	{
 		dragState.instance.setPosition(target.x, target.y);
 		oyun4OccupiedTargets.set(target.uid, dragState.instance);
+		SetOyun4ListenButtonState(runtime);
 
 		if (oyun4OccupiedTargets.size >= 5)
 		{
@@ -423,9 +444,80 @@ function HandleOyun4PointerUp(runtime, event)
 	else
 	{
 		dragState.instance.setPosition(dragState.startX, dragState.startY);
+		SetOyun4ListenButtonState(runtime);
 	}
 
 	oyun4DragState = null;
+}
+
+function GetOyun4SoundFile(runtime, instance)
+{
+	const soundMap = {
+		araba: "aracKorna.webm",
+		cekirge: "cekirge.webm",
+		dalga: "Dalga.webm",
+		esek: "Esek.webm",
+		gemi: "Vapur.webm",
+		kus2: "kus.webm",
+		ruzgar: "ruzgar.webm",
+		yagmur: "yagmur.webm",
+		korna: "korna.webm"
+	};
+
+	for (const [objectName, soundFile] of Object.entries(soundMap))
+	{
+		const objectInstance = runtime.objects[objectName]?.getFirstInstance();
+		if (objectInstance?.uid === instance.uid)
+			return soundFile;
+	}
+
+	return null;
+}
+
+function PlayOyun4PlacedSounds(runtime)
+{
+	const requestId = ++oyun4ListenRequestId;
+	const targets = runtime.objects.yerles?.getAllInstances() ?? [];
+	const soundFiles = targets
+		.map(target => oyun4OccupiedTargets.get(target.uid))
+		.filter(instance => instance)
+		.map(instance => GetOyun4SoundFile(runtime, instance))
+		.filter(soundFile => soundFile);
+
+	StopFeedbackAudio();
+	StopOyun4SimultaneousAudio();
+
+	Promise.all(soundFiles.map(soundFile => runtime.assets.getMediaFileUrl(soundFile)))
+		.then(audioUrls =>
+		{
+			if (requestId !== oyun4ListenRequestId || runtime.layout.name !== "oyun_4")
+				return;
+
+			oyun4SimultaneousAudios = audioUrls.map(audioUrl =>
+			{
+				const audio = new Audio(audioUrl);
+				audio.addEventListener("ended", () =>
+				{
+					oyun4SimultaneousAudios = oyun4SimultaneousAudios.filter(item => item !== audio);
+				});
+				return audio;
+			});
+
+			for (const audio of oyun4SimultaneousAudios)
+				audio.play().catch(error => console.warn("Oyun 4 nesne sesi başlatılamadı:", error));
+		})
+		.catch(error => console.warn("Oyun 4 nesne sesleri yüklenemedi:", error));
+}
+
+function StopOyun4SimultaneousAudio()
+{
+	for (const audio of oyun4SimultaneousAudios)
+	{
+		audio.pause();
+		audio.currentTime = 0;
+	}
+
+	oyun4SimultaneousAudios = [];
 }
 
 function FindAvailableOyun4Target(runtime, event)
@@ -467,6 +559,17 @@ function HandlePointerDown(runtime, event)
 		if (IsPointerOverRect(nextButton, event))
 		{
 			runtime.goToLayout("final");
+			return;
+		}
+	}
+
+	if (runtime.layout.name === "giris")
+	{
+		const referencesButton = runtime.objects.btn_kaynakca?.getFirstInstance();
+		if (IsPointerOverInstance(referencesButton, event))
+		{
+			StopCurrentAudio();
+			runtime.goToLayout("bilgi");
 			return;
 		}
 	}
@@ -545,6 +648,13 @@ function HandlePointerDown(runtime, event)
 
 	if (runtime.layout.name === "oyun_4" && oyun4DragEnabled)
 	{
+		const listenButton = runtime.objects.btn_dinle?.getFirstInstance();
+		if (IsPointerOverInstance(listenButton, event))
+		{
+			PlayOyun4PlacedSounds(runtime);
+			return;
+		}
+
 		PlayOyun4SpriteSound(runtime, event);
 		BeginOyun4Drag(runtime, event);
 	}
@@ -858,6 +968,7 @@ function StopCurrentAudio()
 	}
 
 	StopFeedbackAudio();
+	StopOyun4SimultaneousAudio();
 }
 
 function StopFeedbackAudio()
